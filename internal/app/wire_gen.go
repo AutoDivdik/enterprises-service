@@ -7,29 +7,53 @@
 package app
 
 import (
+	"github.com/AutoDivdik/enterprises-service/internal/app/router"
+	"github.com/AutoDivdik/enterprises-service/internal/infras/repo"
+	"github.com/AutoDivdik/enterprises-service/internal/usecases"
+	"github.com/AutoDivdik/pg-engine"
 	"github.com/AutoDivdik/rmq"
 	"github.com/rabbitmq/amqp091-go"
+	"google.golang.org/grpc"
 )
 
 // Injectors from wire.go:
 
-func InitApp(connStr rmq.RabbitMQConnStr) (*App, func(), error) {
-	connection, cleanup, err := initRabbitMQ(connStr)
+func InitApp(dbConnStr engine.DBConnString, connStr rmq.RabbitMQConnStr, grpcServer *grpc.Server) (*App, func(), error) {
+	dbEngine, cleanup, err := initDB(dbConnStr)
 	if err != nil {
 		return nil, nil, err
 	}
-	eventConsumer, err := rmq.NewConsumer(connection)
+	connection, cleanup2, err := initRabbitMQ(connStr)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
-	app := NewApplication(connection, eventConsumer)
+	eventConsumer, err := rmq.NewConsumer(connection)
+	if err != nil {
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	enterpriseRepo := repo.NewEnterpriseRepo(dbEngine)
+	useCase := usecases.NewUseCase(enterpriseRepo)
+	enterpriseServiceServer := router.NewGRPCServer(grpcServer, useCase)
+	app := NewApplication(dbEngine, connection, eventConsumer, useCase, enterpriseServiceServer)
 	return app, func() {
+		cleanup2()
 		cleanup()
 	}, nil
 }
 
 // wire.go:
+
+func initDB(url engine.DBConnString) (engine.DBEngine, func(), error) {
+	db, err := engine.NewPostgresDB(url, 5, 2)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return db, func() { db.Close() }, nil
+}
 
 func initRabbitMQ(url rmq.RabbitMQConnStr) (*amqp091.Connection, func(), error) {
 	conn, err := rmq.NewRabbitMQConn(url, 5, 2)
